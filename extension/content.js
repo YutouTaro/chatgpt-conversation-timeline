@@ -229,11 +229,13 @@ class TimelineManager {
         this.perfStart('recalc');
         if (!this.conversationContainer || !this.ui.timelineBar || !this.scrollContainer) return;
 
-        const userTurnElements = this.conversationContainer.querySelectorAll('article[data-turn="user"]');
+        // const userTurnElements = this.conversationContainer.querySelectorAll('article[data-turn="user"]');
+        const turnElements = this.conversationContainer.querySelectorAll('article[data-turn="user"], article[data-turn="assistant"]');
         // Reset visible window to avoid cleaning with stale indices after rebuild
         this.visibleRange = { start: 0, end: -1 };
         // If the conversation is transiently empty (branch switching), don't wipe UI immediately
-        if (userTurnElements.length === 0) {
+        // if (userTurnElements.length === 0) {
+        if (turnElements.length === 0) {
             if (!this.zeroTurnsTimer) {
                 this.zeroTurnsTimer = setTimeout(() => {
                     this.zeroTurnsTimer = null;
@@ -247,11 +249,14 @@ class TimelineManager {
         (this.ui.trackContent || this.ui.timelineBar).querySelectorAll('.timeline-dot').forEach(n => n.remove());
 
         let contentSpan;
-        const firstTurnOffset = userTurnElements[0].offsetTop;
-        if (userTurnElements.length < 2) {
+        // const firstTurnOffset = userTurnElements[0].offsetTop;
+        const firstTurnOffset = turnElements[0].offsetTop;
+        // if (userTurnElements.length < 2) {
+        if (turnElements.length < 2) {
             contentSpan = 1;
         } else {
-            const lastTurnOffset = userTurnElements[userTurnElements.length - 1].offsetTop;
+            // const lastTurnOffset = userTurnElements[userTurnElements.length - 1].offsetTop;
+            const lastTurnOffset = turnElements[turnElements.length - 1].offsetTop;
             contentSpan = lastTurnOffset - firstTurnOffset;
         }
         if (contentSpan <= 0) contentSpan = 1;
@@ -262,10 +267,15 @@ class TimelineManager {
 
         // Build markers with normalized position along conversation
         this.markerMap.clear();
-        this.markers = Array.from(userTurnElements).map(el => {
+
+        let userCount = 0;
+        let assistantCount = 0;
+        // this.markers = Array.from(userTurnElements).map(el => {
+        this.markers = Array.from(turnElements).map(el => {
             const offsetFromStart = el.offsetTop - firstTurnOffset;
             let n = offsetFromStart / contentSpan;
             n = Math.max(0, Math.min(1, n));
+            const role = el.dataset.turn;
             const m = {
                 id: el.dataset.turnId,
                 element: el,
@@ -274,6 +284,8 @@ class TimelineManager {
                 baseN: n,
                 dotElement: null,
                 starred: false,
+                role, // : el.dataset.turn user or assistant
+                index: role === 'user' ? ++userCount : ++assistantCount
             };
             try { m.starred = this.starred.has(m.id); } catch {}
             this.markerMap.set(m.id, m);
@@ -1009,9 +1021,14 @@ class TimelineManager {
             if (!marker) continue;
             if (!marker.dotElement) {
                 const dot = document.createElement('button');
-                dot.className = 'timeline-dot';
+                // dot.className = 'timeline-dot';
+                dot.className = `timeline-dot ${marker.role}`;
                 dot.dataset.targetTurnId = marker.id;
                 dot.setAttribute('aria-label', marker.summary);
+                const label = document.createElement('span');
+                label.className = 'timeline-index';
+                label.textContent = marker.index;
+                dot.appendChild(label);
                 dot.setAttribute('tabindex', '0');
                 try { dot.setAttribute('aria-describedby', 'chatgpt-timeline-tooltip'); } catch {}
                 try { dot.style.setProperty('--n', String(marker.n || 0)); } catch {}

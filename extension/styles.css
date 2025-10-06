@@ -26,7 +26,7 @@
     --timeline-tooltip-anim-out: 100ms linear;
 
     --timeline-bar-bg: rgba(240, 240, 240, 0.8);
-    --timeline-dot-size: 12px;
+    --timeline-dot-size: 14px;  /* larger font size */
     --timeline-active-ring: 3px;
     --timeline-track-padding: 16px;
     --timeline-tooltip-max: 288px;
@@ -78,6 +78,8 @@ html.dark {
     height: 100%;
     overflow-y: auto; /* programmatic scroll in Linked mode */
 }
+.timeline-track::-webkit-scrollbar { width: 0; height: 0; }
+.timeline-track { scrollbar-width: none; }
 
 /* Inner content whose height reflects conversation length */
 .timeline-track-content {
@@ -116,6 +118,16 @@ html.dark {
     transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* user dot: gray bg + white text */
+.timeline-dot.user::after {
+    background-color: #9CA3AF; /* Gray 400 */
+}
+
+/* assistant dot: GPT green + white text */
+.timeline-dot.assistant::after {
+    background-color: #10A37F; /* ChatGPT Green */
+}
+
 /* .timeline-dot::before {
     content: '';
     position: absolute;
@@ -137,7 +149,9 @@ html.dark {
 }
 /* Style for the currently active dot */
 .timeline-dot.active::after {
-    box-shadow: 0 0 0 var(--timeline-active-ring) var(--timeline-dot-active-color), 0 0 6px var(--timeline-dot-active-color);
+    background-color: #059669; /* 深绿色 */
+    box-shadow: 0 0 0 var(--timeline-active-ring) var(--timeline-dot-active-color),
+                0 0 6px var(--timeline-dot-active-color);
 }
 
 /* Starred state: filled with star color */
@@ -164,6 +178,22 @@ html.dark {
 @keyframes timeline-hold-fade {
   from { opacity: 0.15; }
   to   { opacity: 0.85; }
+}
+
+/* ===============================
+   Timeline Dot numbering
+================================= */
+.timeline-index {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 11px;
+    font-weight: 600;
+    color: white;
+    z-index: 1;
+    pointer-events: none;
+    user-select: none;
 }
 
 /* Floating tooltip element */
@@ -224,6 +254,8 @@ html.dark {
 }
 
 /* Arrow (diamond) using rotated square; inherits colors */
+.timeline-tooltip[data-placement="left"] { transform-origin: right center; }
+.timeline-tooltip[data-placement="right"] { transform-origin: left center; }
 .timeline-tooltip::after {
     content: '';
     position: absolute;
@@ -304,7 +336,7 @@ html.dark .timeline-slider::before { background: rgba(255,255,255,0.10); }
     z-index: 2147483646; /* align with bar */
     pointer-events: none;
 }
-.timeline-left-slider.visible { opacity: 1;  pointer-events: auto; }
+.timeline-left-slider.visible { opacity: 1; pointer-events: auto; }
 .timeline-left-slider::before {
     content: '';
     position: absolute;

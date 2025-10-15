@@ -1,17 +1,3 @@
-/**
- * ChatGPT Conversation Timeline Manager - v1.8 (Definitive Alignment)
- *
- * This is the final, polished version that adheres to the highest UI standards.
- * It introduces a perfect endpoint-mapping algorithm that ensures the timeline
- * always feels intuitive and correctly represents the user's conversation journey.
- *
- * Key Improvements:
- * 1.  Perfect Endpoint Mapping: The positioning algorithm is finalized. It now
- *     maps the first user prompt to 0% and the LAST user prompt to 100%,
- *     providing a predictable and visually complete navigation map.
- * 2.  This solves all alignment edge cases for both short and long conversations,
- *     achieving the "unnoticeable" and "silky smooth" quality of AI Studio.
- */
 class TimelineManager {
     constructor() {
         this.scrollContainer = null;
@@ -24,6 +10,7 @@ class TimelineManager {
         this.mutationObserver = null;
         this.resizeObserver = null;
         this.intersectionObserver = null;
+        this.themeObserver = null; // observe theme class changes to refresh geometry
         this.visibleUserTurns = new Set();
         this.onTimelineBarClick = null;
         this.onScroll = null;
@@ -67,15 +54,10 @@ class TimelineManager {
         this.onSliderMove = null;
         this.onSliderUp = null;
         this.markersVersion = 0;
-        // Resize idle correction scheduling + debug perf
-        this.resizeIdleTimer = null;
-        this.resizeIdleDelay = 140; // ms settle time before min-gap correction
-        this.resizeIdleRICId = null; // requestIdleCallback id
+        // Debug perf
         this.debugPerf = false;
         try { this.debugPerf = (localStorage.getItem('chatgptTimelineDebugPerf') === '1'); } catch {}
         this.onVisualViewportResize = null;
-        this.resizeIdleTimer = null;
-        this.resizeIdleDelay = 140; // ms, settle time before min-gap correction
         
         this.debouncedRecalculateAndRender = this.debounce(this.recalculateAndRenderMarkers, 350);
 
@@ -117,9 +99,27 @@ class TimelineManager {
         this.injectTimelineUI();
         this.setupEventListeners();
         this.setupObservers();
+        // Force an immediate first build so dots appear without waiting for mutations
+        try { this.recalculateAndRenderMarkers(); } catch {}
         // Load persisted star markers for current conversation
         this.conversationId = this.extractConversationIdFromPath(location.pathname);
         this.loadStars();
+        // After loading stars, sync current markers/dots to reflect star state immediately
+        try {
+            for (let i = 0; i < this.markers.length; i++) {
+                const m = this.markers[i];
+                const want = this.starred.has(m.id);
+                if (m.starred !== want) {
+                    m.starred = want;
+                    if (m.dotElement) {
+                        try {
+                            m.dotElement.classList.toggle('starred', m.starred);
+                            m.dotElement.setAttribute('aria-pressed', m.starred ? 'true' : 'false');
+                        } catch {}
+                    }
+                }
+            }
+        } catch {}
         // Initial rendering will be triggered by observers; avoid duplicate delayed re-render
     }
     
@@ -344,6 +344,18 @@ class TimelineManager {
         });
 
         this.updateIntersectionObserverTargets();
+
+        // Observe theme toggles (e.g., html.dark) to refresh geometry immediately
+        try {
+            if (!this.themeObserver) {
+                this.themeObserver = new MutationObserver(() => {
+                    this.updateTimelineGeometry();
+                    this.syncTimelineTrackToMain();
+                    this.updateVirtualRangeAndRender();
+                });
+            }
+            this.themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+        } catch {}
     }
 
     // Ensure our conversation/scroll containers are still current after DOM replacements
@@ -364,6 +376,7 @@ class TimelineManager {
         }
         try { this.mutationObserver?.disconnect(); } catch {}
         try { this.intersectionObserver?.disconnect(); } catch {}
+        try { this.themeObserver?.disconnect(); } catch {}
 
         this.conversationContainer = newConv;
 
@@ -686,12 +699,13 @@ class TimelineManager {
         return Number.isFinite(n) ? n : fallback;
     }
 
-    // Normalize whitespace and trim; remove leading "You said:" SR-only prefix; no manual ellipsis
+    // Normalize whitespace and trim; remove leading SR-only prefixes like "You said:" / "你说："; no manual ellipsis
     normalizeText(text) {
         try {
             let s = String(text || '').replace(/\s+/g, ' ').trim();
             // Strip only if it appears at the very start
             s = s.replace(/^\s*(you\s*said\s*[:：]?\s*)/i, '');
+            s = s.replace(/^\s*((你说|您说|你說|您說)\s*[:：]?\s*)/, '');
             return s;
         } catch {
             return '';
@@ -743,55 +757,7 @@ class TimelineManager {
         return out;
     }
 
-    // Debounced scheduler: after resize/zoom settles, re-apply min-gap based on cached normalized positions
-    scheduleMinGapCorrection() {
-        try { if (this.resizeIdleTimer) { clearTimeout(this.resizeIdleTimer); } } catch {}
-        try {
-            if (this.resizeIdleRICId && typeof cancelIdleCallback === 'function') {
-                cancelIdleCallback(this.resizeIdleRICId);
-                this.resizeIdleRICId = null;
-            }
-        } catch {}
-        this.resizeIdleTimer = setTimeout(() => {
-            this.resizeIdleTimer = null;
-            // Prefer idle callback to avoid contention; fallback to immediate
-            try {
-                if (typeof requestIdleCallback === 'function') {
-                    this.resizeIdleRICId = requestIdleCallback(() => {
-                        this.resizeIdleRICId = null;
-                        this.reapplyMinGapAfterResize();
-                    }, { timeout: 200 });
-                    return;
-                }
-            } catch {}
-            this.reapplyMinGapAfterResize();
-        }, this.resizeIdleDelay);
-    }
-
-    // Lightweight correction: map cached n -> pixel, apply min-gap, write back updated n
-    reapplyMinGapAfterResize() {
-        this.perfStart('minGapIdle');
-        if (!this.ui.timelineBar || this.markers.length === 0) return;
-        const barHeight = this.ui.timelineBar.clientHeight || 0;
-        const trackPadding = this.getTrackPadding();
-        const usable = Math.max(1, barHeight - 2 * trackPadding);
-        const minTop = trackPadding;
-        const maxTop = trackPadding + usable;
-        const minGap = this.getMinGap();
-        // Use cached normalized positions (default 0)
-        const desired = this.markers.map(m => {
-            const n = Math.max(0, Math.min(1, (m.n ?? 0)));
-            return minTop + n * usable;
-        });
-        const adjusted = this.applyMinGap(desired, minTop, maxTop, minGap);
-        for (let i = 0; i < this.markers.length; i++) {
-            const top = adjusted[i];
-            const n = (top - minTop) / Math.max(1, (maxTop - minTop));
-            this.markers[i].n = Math.max(0, Math.min(1, n));
-            try { this.markers[i].dotElement?.style.setProperty('--n', String(this.markers[i].n)); } catch {}
-        }
-        this.perfEnd('minGapIdle');
-    }
+    // (Removed) Idle min-gap reapply; ChatGPT keeps min-gap solely in updateTimelineGeometry
 
     showTooltipForDot(dot) {
         if (!this.ui.tooltip) return;
@@ -1385,16 +1351,7 @@ class TimelineManager {
             try { clearTimeout(this.tooltipHideTimer); } catch {}
             this.tooltipHideTimer = null;
         }
-        if (this.resizeIdleTimer) {
-            try { clearTimeout(this.resizeIdleTimer); } catch {}
-            this.resizeIdleTimer = null;
-        }
-        try {
-            if (this.resizeIdleRICId && typeof cancelIdleCallback === 'function') {
-                cancelIdleCallback(this.resizeIdleRICId);
-                this.resizeIdleRICId = null;
-            }
-        } catch {}
+        
         if (this.sliderFadeTimer) { try { clearTimeout(this.sliderFadeTimer); } catch {} this.sliderFadeTimer = null; }
         this.pendingActiveId = null;
     }
@@ -1465,6 +1422,8 @@ let initTimerId = null;            // cancellable delayed init
 let pageObserver = null;           // page-level MutationObserver (managed)
 let routeCheckIntervalId = null;   // lightweight href polling fallback
 let routeListenersAttached = false;
+let timelineActive = true;         // global on/off
+let providerEnabled = true;        // per-provider on/off (chatgpt)
 
 // Accept both /c/<id> and nested routes like /g/.../c/<id>
 function isConversationRoute(pathname = location.pathname) {
@@ -1523,11 +1482,11 @@ function handleUrlChange() {
     // Cancel any pending init from previous route
     try { if (initTimerId) { clearTimeout(initTimerId); initTimerId = null; } } catch {}
 
-    if (isConversationRoute()) {
+    if (isConversationRoute() && (timelineActive && providerEnabled)) {
         // Delay slightly to allow DOM to settle; re-check path before init
         initTimerId = setTimeout(() => {
             initTimerId = null;
-            if (isConversationRoute()) initializeTimeline();
+            if (isConversationRoute() && (timelineActive && providerEnabled)) initializeTimeline();
         }, 300);
     } else {
         if (timelineManagerInstance) {
@@ -1543,9 +1502,7 @@ function handleUrlChange() {
 
 const initialObserver = new MutationObserver(() => {
     if (document.querySelector('article[data-turn-id]')) {
-        if (isConversationRoute()) {
-            initializeTimeline();
-        }
+        if (isConversationRoute() && (timelineActive && providerEnabled)) { initializeTimeline(); }
         try { initialObserver.disconnect(); } catch {}
         // Create a single managed pageObserver
         pageObserver = new MutationObserver(handleUrlChange);
@@ -1554,3 +1511,55 @@ const initialObserver = new MutationObserver(() => {
     }
 });
 try { initialObserver.observe(document.body, { childList: true, subtree: true }); } catch {}
+
+// Read initial toggles (new keys only) and react to changes
+try {
+  if (chrome?.storage?.local) {
+    chrome.storage.local.get({ timelineActive: true, timelineProviders: {} }, (res) => {
+      try { timelineActive = !!res.timelineActive; } catch { timelineActive = true; }
+      try {
+        const map = res.timelineProviders || {};
+        providerEnabled = (typeof map.chatgpt === 'boolean') ? map.chatgpt : true;
+      } catch { providerEnabled = true; }
+
+      const enabled = timelineActive && providerEnabled;
+      if (!enabled) {
+        if (timelineManagerInstance) { try { timelineManagerInstance.destroy(); } catch {} timelineManagerInstance = null; }
+        try { document.querySelector('.chatgpt-timeline-bar')?.remove(); } catch {}
+        try { document.querySelector('.timeline-left-slider')?.remove(); } catch {}
+        try { document.getElementById('chatgpt-timeline-tooltip')?.remove(); } catch {}
+      } else {
+        if (isConversationRoute() && document.querySelector('article[data-turn-id]')) {
+          initializeTimeline();
+        }
+      }
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes) return;
+      let changed = false;
+      if ('timelineActive' in changes) {
+        timelineActive = !!changes.timelineActive.newValue;
+        changed = true;
+      }
+      if ('timelineProviders' in changes) {
+        try {
+          const map = changes.timelineProviders.newValue || {};
+          providerEnabled = (typeof map.chatgpt === 'boolean') ? map.chatgpt : true;
+          changed = true;
+        } catch {}
+      }
+      if (!changed) return;
+      const enabled = timelineActive && providerEnabled;
+      if (!enabled) {
+        if (timelineManagerInstance) { try { timelineManagerInstance.destroy(); } catch {} timelineManagerInstance = null; }
+        try { document.querySelector('.chatgpt-timeline-bar')?.remove(); } catch {}
+        try { document.querySelector('.timeline-left-slider')?.remove(); } catch {}
+        try { document.getElementById('chatgpt-timeline-tooltip')?.remove(); } catch {}
+      } else {
+        if (isConversationRoute() && document.querySelector('article[data-turn-id]')) {
+          initializeTimeline();
+        }
+      }
+    });
+  }
+} catch {}

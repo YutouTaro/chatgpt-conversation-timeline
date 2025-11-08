@@ -8,21 +8,50 @@
   function isConversationRouteDeepseek(pathname = location.pathname) {
     try {
       const segs = String(pathname || '').split('/').filter(Boolean);
+      // Primary app route: /s/<id>
       const i = segs.indexOf('s');
-      if (i === -1) return false;
-      const slug = segs[i + 1];
-      return typeof slug === 'string' && slug.length > 0 && /^[A-Za-z0-9_-]+$/.test(slug);
+      if (i !== -1) {
+        const slug = segs[i + 1];
+        if (typeof slug === 'string' && slug.length > 0 && /^[A-Za-z0-9_-]+$/.test(slug)) return true;
+      }
+      // Share route: /share/<slug>
+      const ishr = segs.indexOf('share');
+      if (ishr !== -1) {
+        const slug = segs[ishr + 1];
+        if (typeof slug === 'string' && slug.length > 0 && /^[A-Za-z0-9_-]+$/.test(slug)) return true;
+      }
+      return false;
     } catch { return false; }
   }
 
   function extractConversationIdFromPath(pathname = location.pathname) {
     try {
       const segs = String(pathname || '').split('/').filter(Boolean);
+      // /s/<id>
       const i = segs.indexOf('s');
-      if (i === -1) return null;
-      const slug = segs[i + 1];
-      return (slug && /^[A-Za-z0-9_-]+$/.test(slug)) ? slug : null;
+      if (i !== -1) {
+        const slug = segs[i + 1];
+        if (slug && /^[A-Za-z0-9_-]+$/.test(slug)) return slug;
+      }
+      // /share/<slug> → namespace to avoid collision with /s/<id>
+      const ishr = segs.indexOf('share');
+      if (ishr !== -1) {
+        const slug = segs[ishr + 1];
+        if (slug && /^[A-Za-z0-9_-]+$/.test(slug)) return `share:${slug}`;
+      }
+      return null;
     } catch { return null; }
+  }
+
+  // Detect DeepSeek share route (/share/<slug>) explicitly
+  function isShareRouteDeepseek(pathname = location.pathname) {
+    try {
+      const segs = String(pathname || '').split('/').filter(Boolean);
+      const i = segs.indexOf('share');
+      if (i === -1) return false;
+      const slug = segs[i + 1];
+      return typeof slug === 'string' && slug.length > 0 && /^[A-Za-z0-9_-]+$/.test(slug);
+    } catch { return false; }
   }
 
   // --- DOM utilities (Stage 2) ---
@@ -89,9 +118,16 @@
   }
 
   // Heuristic user-message detector
+  // Priority 0: if the message is inside a container marked with data-um-id (user message block), treat as user
   // Primary: user messages are followed by an actions toolbar (next sibling)
   // Fallback: user bubbles are right-aligned relative to the conversation container
   function detectIsUserMessage(el, conversationContainer) {
+    // data-um-id block observed on both regular chat and share pages
+    try {
+      const owner = el?.closest?.('[data-um-id]');
+      if (owner) return true;
+    } catch {}
+
     try {
       const next = el?.nextElementSibling;
       if (next) {
@@ -219,6 +255,14 @@
       this.loadStars();
 
       this.rebuildMarkers();
+      // Share -> Chat handoff adoption or snapshot publish
+      try {
+        if (isShareRouteDeepseek()) {
+          this.updateShareHandoffSnapshot();
+        } else {
+          this.tryAdoptShareHandoff();
+        }
+      } catch {}
       this.attachObservers();
       this.attachScrollSync();
       this.attachInteractions();
@@ -372,21 +416,56 @@
       this.firstOffset = firstY;
       this.spanPx = span;
 
-      // build stable id using user text hash + ordinal (per session scan)
+      // Build ids with priority: data-turn-id > data-um-id > legacy (text-hash + ordinal)
       const seen = new Map();
+      let migrated = false;
       this.markers = list.map((el) => {
         const r = el.getBoundingClientRect();
         const y = (r.top - cRect.top) + st;
         const n = Math.max(0, Math.min(1, (y - firstY) / span));
-        let id = el?.dataset?.turnId;
-        if (!id) {
-          const base = this.buildStableHashFromUser(el);
-          const cnt = (seen.get(base) || 0) + 1; seen.set(base, cnt);
-          id = `${base}-${cnt}`;
+
+        // Candidates
+        const turnId = el?.dataset?.turnId || null;
+        let umId = null;
+        try {
+          const owner = el.closest('[data-um-id]');
+          const v = owner?.getAttribute('data-um-id');
+          if (v) umId = `um:${v}`;
+        } catch {}
+        // Legacy hash id (previous fallback behavior)
+        const base = this.buildStableHashFromUser(el);
+        const cnt = (seen.get(base) || 0) + 1; seen.set(base, cnt);
+        const legacyId = `${base}-${cnt}`;
+
+        // Choose preferred id
+        let id = turnId || umId || legacyId;
+
+        // Migration: if new preferred id differs from legacy/um and an old star exists, migrate it
+        if (!this.starred.has(id)) {
+          const oldCandidates = [];
+          if (legacyId && legacyId !== id) oldCandidates.push(legacyId);
+          if (umId && umId !== id) oldCandidates.push(umId);
+          for (let k = 0; k < oldCandidates.length; k++) {
+            const oldId = oldCandidates[k];
+            if (this.starred.has(oldId)) {
+              try { this.starred.delete(oldId); } catch {}
+              try { this.starred.add(id); } catch {}
+              migrated = true;
+              break;
+            }
+          }
+        }
+
+        // For pure legacy fallback within this session, keep dataset turnId to stabilize incremental passes
+        if (!turnId && !umId && legacyId === id) {
           try { el.dataset.turnId = id; } catch {}
         }
+
         return { id, el, n, baseN: n, dotElement: null, summary: normalizeText(el.textContent || ''), starred: this.starred.has(id) };
       });
+
+      // Persist migrated stars once after rebuild
+      if (migrated) { try { this.saveStars(); } catch {} }
 
       // bump version and compute geometry + virtual render
       this.markersVersion++;
@@ -954,11 +1033,80 @@
     if (!cid) return;
     try { localStorage.setItem(`deepseekTimelineStars:${cid}`, JSON.stringify(Array.from(this.starred))); } catch {}
   };
+  // Persist a lightweight handoff snapshot from share route so that stars survive redirect to /a/chat/s/<id>
+  DeepseekTimeline.prototype.updateShareHandoffSnapshot = function() {
+    try {
+      if (!isShareRouteDeepseek()) return;
+      const items = [];
+      for (let i = 0; i < this.markers.length; i++) {
+        const m = this.markers[i];
+        if (!m) continue;
+        try {
+          const h = this.buildStableHashFromUser(m.el);
+          const isStar = this.starred.has(m.id);
+          items.push({ hash: h, starred: !!isStar });
+        } catch {}
+      }
+      const payload = {
+        ts: Date.now(),
+        fromCid: this.conversationId || null,
+        items
+      };
+      localStorage.setItem('deepseekShareHandoff', JSON.stringify(payload));
+    } catch {}
+  };
+  // On chat route, try adopting recent share snapshot stars by matching message text hashes
+  DeepseekTimeline.prototype.tryAdoptShareHandoff = function() {
+    try {
+      if (isShareRouteDeepseek()) return; // only adopt on non-share chat route
+      const raw = localStorage.getItem('deepseekShareHandoff');
+      if (!raw) return;
+      let data = null;
+      try { data = JSON.parse(raw); } catch { data = null; }
+      if (!data || !Array.isArray(data.items)) return;
+      const age = Date.now() - (data.ts || 0);
+      if (!(age >= 0 && age <= 3 * 60 * 1000)) return; // adopt only if within 3 minutes
+
+      // Build a Set of hashes that were starred on share page
+      const starredHashes = new Set();
+      for (let i = 0; i < data.items.length; i++) {
+        const it = data.items[i];
+        if (it && it.starred && typeof it.hash === 'string') starredHashes.add(it.hash);
+      }
+      if (starredHashes.size === 0) return;
+
+      // Map starred hashes to current chat markers
+      let migratedAny = false;
+      for (let i = 0; i < this.markers.length; i++) {
+        const m = this.markers[i];
+        if (!m) continue;
+        let h = null;
+        try { h = this.buildStableHashFromUser(m.el); } catch {}
+        if (!h) continue;
+        if (starredHashes.has(h) && !this.starred.has(m.id)) {
+          try { this.starred.add(m.id); migratedAny = true; } catch {}
+          // reflect to UI immediately if dot already exists
+          try {
+            if (m.dotElement) {
+              m.starred = true;
+              m.dotElement.classList.add('starred');
+              m.dotElement.setAttribute('aria-pressed', 'true');
+            }
+          } catch {}
+        }
+      }
+      if (migratedAny) this.saveStars();
+      // Clear handoff to avoid re-applying later pages
+      try { localStorage.removeItem('deepseekShareHandoff'); } catch {}
+    } catch {}
+  };
   DeepseekTimeline.prototype.toggleStar = function(turnId) {
     const id = String(turnId || '');
     if (!id) return;
     if (this.starred.has(id)) this.starred.delete(id); else this.starred.add(id);
     this.saveStars();
+    // If on share route, refresh handoff snapshot so redirect can adopt
+    try { if (isShareRouteDeepseek()) this.updateShareHandoffSnapshot(); } catch {}
     const m = this.markers.find(mm => mm.id === id);
     if (m && m.dotElement) {
       m.starred = this.starred.has(id);

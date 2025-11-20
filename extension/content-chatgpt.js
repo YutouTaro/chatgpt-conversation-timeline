@@ -269,13 +269,20 @@ class TimelineManager {
         this.markerMap.clear();
 
         let userCount = 0;
-        let assistantCount = 0;
+        // let assistantCount = 0;
         // this.markers = Array.from(userTurnElements).map(el => {
         this.markers = Array.from(turnElements).map(el => {
             const offsetFromStart = el.offsetTop - firstTurnOffset;
             let n = offsetFromStart / contentSpan;
             n = Math.max(0, Math.min(1, n));
             const role = el.dataset.turn;
+            let index;
+            if (role === 'user'){
+                index = ++userCount;
+            } else {
+                index = userCount > 0 ? userCount : 1;
+            }
+
             const m = {
                 id: el.dataset.turnId,
                 element: el,
@@ -285,7 +292,7 @@ class TimelineManager {
                 dotElement: null,
                 starred: false,
                 role, // : el.dataset.turn user or assistant
-                index: role === 'user' ? ++userCount : ++assistantCount
+                index: index
             };
             try { m.starred = this.starred.has(m.id); } catch {}
             this.markerMap.set(m.id, m);
